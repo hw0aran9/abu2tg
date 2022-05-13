@@ -3,7 +3,8 @@ import sqlite3
 conn = sqlite3.connect('config.db')
 cur = conn.cursor()
 
-cur.execute("""
+cur.execute(
+    """
     create table if not exists streams(
     
     id int primary key,
@@ -11,9 +12,20 @@ cur.execute("""
     src_thread_id int,
     src_last_post_id int,
     dst_channel_id int
+    );
+    """
+    )
 
-);
-""")
+cur.execute(
+    """
+    create table if not exists mappings(
+        stream_id int,
+        src_id int,
+        dst_id int
+    )
+    """
+    )
+
 conn.commit()
 
 tasks = [
