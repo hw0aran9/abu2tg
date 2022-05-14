@@ -38,12 +38,14 @@ def get_latest_posts(board, thread_id, after):
     return result
 
 def get_flag_emoji(text): 
+
     try:
         country_code = re.findall(REGEX['flag'], text)[0][2]
+        result = str(flag.flag(country_code))
     except Exception as e:
-        country_code = 'VN' # сделаем вид, что флаг Вьетнама - это ошибка
         print('get_flag_emoji: '+str(e))
-    return str(flag.flag(country_code))
+        result = '🟥'
+    return result
 
 def get_date_from_ts(ts):
     try:
@@ -59,7 +61,7 @@ def get_anon_id(html):
         result = result.replace('&nbsp;', ' ')
     except Exception as e:
         print('get_anon_id: '+str(e))
-        result = '<b>Аноним</b>'
+        result = '<i>Heaven</i>'
     return result
 
 def get_converted_text(html):
@@ -192,7 +194,6 @@ POST_TEMPLATE = "🆔{num} {anon}{emoji}\n{date}\n\n{text}"
 #     )
 
 
-
 while True:
     streams = get_streams()
     for stream in streams:
@@ -206,6 +207,9 @@ while True:
    
         print(f"Executing task of {str(len(posts))} posts...")
         for post in posts:
+            print(post['num'], ' by ', get_anon_id(post['name']))
+        
+        for post in posts:
             time.sleep(TELEGRAM['time_between_posts_secs'])
             print(str(post))
             try:    
@@ -214,7 +218,7 @@ while True:
                         POST_TEMPLATE.format(
                         num = str(post['num']), 
                         anon = get_anon_id(post['name']), 
-                        emoji = get_flag_emoji(post['icon']),
+                        emoji = get_flag_emoji(post['icon']) if 'icon' in post.keys() else '🐽',
                         date = get_date_from_ts(post['timestamp']),
                         text = get_converted_text(post['comment'])
                         ),
