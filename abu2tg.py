@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from bs4 import BeautifulSoup
 import urllib.parse
 
-from config import ENDPOINT, TELEGRAM, DB, BOT, REGEX, REPLACEMENTS
+from config import SOURCE, TELEGRAM, DB, BOT, REGEX, REPLACEMENTS
 
 conn = sqlite3.connect(DB['name'])
 cur = conn.cursor()
@@ -23,18 +23,18 @@ def get_streams():
     return cur.fetchall()    
 
 def get_full_thread(board, thread_id):
-    response = requests.get(f"{ENDPOINT['url']}/{board}/res/{str(thread_id)}.json")
+    response = requests.get(f"{SOURCE['url']}/{board}/res/{str(thread_id)}.json")
     result = json.loads(response.content.decode('utf-8'))['threads'][0]['posts']
+    
+    return result
+
+def get_latest_posts(board, thread_id, after):
+    response = requests.get(f"{SOURCE['url']}/api/mobile/v2/after/{board}/{thread_id}/{after}")
+    result = json.loads(response.content.decode('utf-8'))['posts'][1:]
     # удаляем самый первый элемент списка, чтобы не было дублей
     # дубли постов будут, так как в базе запоминается последний обработанный 
     # пост, и если запрашивать метод API after по нему - он будет возвращен первым
     # поэтому первцй элемент нам более не нужен
-    del result[0]
-    return result
-
-def get_latest_posts(board, thread_id, after):
-    response = requests.get(f"{ENDPOINT['url']}/api/mobile/v2/after/{board}/{thread_id}/{after}")
-    result = json.loads(response.content.decode('utf-8'))['posts']
     return result
 
 def get_flag_emoji(text): 
@@ -125,20 +125,34 @@ def get_converted_text(html):
         del tag['class']
         del tag['data-num']
         del tag['data-thread']
-        tag['href'] = ENDPOINT['url']+tag['href']
+        tag['href'] = SOURCE['url']+tag['href']
+    
     for k in REPLACEMENTS.keys():
         soup = str(soup).replace(k, REPLACEMENTS[k])
-    return str(soup)#.replace('&gt;','%3E').replace('#', '%23').replace('&','%26')
+    
+    soup = BeautifulSoup(soup, 'html.parser')
+    
+    if len(str(soup)) > TELEGRAM['txt_limit']:
+        print(f"too long ({len(str(soup))} > {TELEGRAM['txt_limit']}) - removing tags")
+        all_tags = soup.find_all()
+        for tag in all_tags:
+            tag.extract()
+
+    if len(str(soup)) > TELEGRAM['txt_limit']:
+        print(f"still too long ({len(str(soup))} > {TELEGRAM['txt_limit']}) reducing text length")
+        soup = str(soup)[0:TELEGRAM['txt_limit']]+'[...]'
+    
+    result = str(soup)
+    return result
 
 def send_message(chat_id, text, parse_mode):
     response = requests.get(f"{TELEGRAM['url']}bot{BOT['token']}/sendMessage?chat_id={chat_id}&parse_mode={parse_mode}&text={text}")
-    print(f"[{response.status_code}]: {response.content if response.status_code != 200 else ''}")
-    print(f"{text if response.status_code != 200 else ''}")
-    
+    print(response.status_code)    
     if response.status_code == 200:
         message_id = response.json()['result']['message_id']
     else:
         message_id = 0
+        print(text, '>>>>>', response.content)
     return message_id
     
 
@@ -150,49 +164,7 @@ def send_single_photo(chat_id, url):
     response = requests.get(f"{TELEGRAM['url']}bot{BOT['token']}/sendPhoto?chat_id={chat_id}&photo={url}")
     print(f"[{response.status_code}]: {url}")
 
-# post = {
-#         "banned": 0,
-#         "board": "d",
-#         "closed": 0,
-#         "comment": "ТЫ ПИДОР<br><br>Это обычный текст<br><span class=\"unkfunc\">&gt;Это цитирование</span><br><strong>Это жирный текст</strong><br><em>Это курсив</em><br><em><strong>Это жирный курсив</strong></em><br><span class=\"u\">Это подчеркнутый текст</span><br><span class=\"o\">Это надчеркнутый текст</span><br><span class=\"spoiler\">Это спойлер</span><br><span class=\"s\">Это зачеркнутый текст</span><br><br><sup>Это верхняя хуета</sup><br><sub>Это нижняя хуита</sub><br><br>Это нерабочая ссылка на какой-то пост &gt;&gt;12345678<br>Это ссылка на пост набитая руками: <a href=\"/d/res/451903.html#921879\" class=\"post-reply-link\" data-thread=\"451903\" data-num=\"921879\">>>921879</a><br>Это ссылка, полученная реплаем <a href=\"/d/res/451903.html#921879\" class=\"post-reply-link\" data-thread=\"451903\" data-num=\"921879\">>>921879</a>",
-#         "date": "12/05/22 Чтв 17:23:30",
-#         "dislikes": 0,
-#         "email": "mailto:mail@email.com",
-#         "endless": 1,
-#         "files": [], 
-#         "lasthit": 1652365410,
-#         "likes": 0,
-#         "icon": "<img hspace=\"3\" src=\"/icons/logos/omich.png\" title=\"ОМСК\" border=\"0\" />&nbsp;<img hspace=\"3\" src=\"/flags/DE.png\" border=\"0\" />",
-#         "name": "Аноним&nbsp;ID:&nbsp;<span id=\"id_tag_5a8d8a05\" style=\"color:rgb(232,47,64);\">Ненасытный&nbsp;Крошка Вригль</span>",
-#         "num": 921880,
-#         "number": 501,
-#         "op": 0,
-#         "parent": 451903,
-#         "sticky": 67,
-#         "subject": ">Тестовое сообщение",
-#         "timestamp": 1652365410,
-#         "trip": "",
-#         "views": 0
-#         }
-
 POST_TEMPLATE = "🆔{num} {anon}{emoji}\n{date}\n\n{text}"
-
-
-#print(get_converted_text(post['comment']))
-
-# send_message(
-#     -1001779229444,   
-#     POST_TEMPLATE.format(
-#     num = str(post['num']), 
-#     anon = get_anon_id(post['name']), 
-#     emoji = get_flag_emoji(post['icon']),
-#     date = get_date_from_ts(post['timestamp']),
-#     text = get_converted_text(post['comment'])
-#     )
-#     ,
-#     'HTML'
-#     )
-
 
 while True:
     streams = get_streams()
@@ -206,18 +178,17 @@ while True:
             posts = get_latest_posts(stream[1], stream[2], stream[3])
    
         print(f"Executing task of {str(len(posts))} posts...")
+        if posts == []:
+            print(f'No new posts for Stream #{stream[0]}')
+            break 
         for post in posts:
-            print(post['num'], ' by ', get_anon_id(post['name']))
-        
-        for post in posts:
-            time.sleep(TELEGRAM['time_between_posts_secs'])
-            print(str(post))
+            print(f"Sending [{posts.index(post)+1}/{len(posts)}]")
             try:    
                 msg_id = send_message(
                     stream[4], 
                         POST_TEMPLATE.format(
                         num = str(post['num']), 
-                        anon = get_anon_id(post['name']), 
+                        anon = get_anon_id(post['name']) if 'name' in post.keys() else '<i>Аноним</i>', 
                         emoji = get_flag_emoji(post['icon']) if 'icon' in post.keys() else '🐽',
                         date = get_date_from_ts(post['timestamp']),
                         text = get_converted_text(post['comment'])
@@ -231,6 +202,7 @@ while True:
                 print(f"Post {str(post['num'])} registered.")
             except Exception as e:
                 print(f"Failed to send post {str(post['num'])}!", str(e))
+            time.sleep(TELEGRAM['posting_delay'])
         print(f"Task {stream[0]} complete.")
     print('All tasks complete, restarting...')
     time.sleep(1)
