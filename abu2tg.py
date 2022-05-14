@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from bs4 import BeautifulSoup
 import urllib.parse
 
-from config import SOURCE, TELEGRAM, DB, BOT, REGEX, REPLACEMENTS
+from config import SOURCE, TELEGRAM, DB, BOT, REGEX, REPLACEMENTS, MEDIA
 
 conn = sqlite3.connect(DB['name'])
 cur = conn.cursor()
@@ -64,7 +64,50 @@ def get_anon_id(html):
         result = '<i>Heaven</i>'
     return result
 
-def get_converted_text(html):
+def add_replies(post: dict, comment_field: str) -> dict:
+    """
+    Scans post text and adds
+    list of replies (source ids)
+    as a new key of post json
+    """
+    if not comment_field in post.keys():
+        return post
+
+    replies = []
+
+    soup = BeautifulSoup(post[comment_field], 'html.parser')
+    
+    reply_links = soup.find_all('a', attrs={'class': 'post-reply-link'})
+    for link in reply_links: 
+        replies.append(link['data-num'])
+
+    post['replies'] = replies
+    return post
+
+def remove_unsupported_media(post:dict) -> dict:
+    if not 'files' in post.keys() or post['files'] == [] or post['files'] == None:
+        return post
+
+    files_list = post['files']
+    files_list[:] = [x for x in files_list if x['type'] in MEDIA['supported_types']]
+    #files_list[:] = [x for x in files_list if (x['width'] + x['height']) > MEDIA['pic_limit_size_hw']]
+    return post
+    
+def get_mapped_value(stream, src_val: int) -> int:
+    """
+    Gets mapped value from database table.
+    Table must contain both of the fields
+    specified in args
+    """
+    cur.execute(f"select dst_id from mappings where stream_id = {stream} and src_id = {src_val} order by dst_id desc limit 1")
+    try:
+        result = cur.fetchall()[0][0]
+    except Exception as e: 
+        result = 0
+        print(f"Failed to get mapped value for {src_val}: {str(e)}")
+    return result
+
+def get_converted_text(html, len_limit):
     # TODO переписать, проитерировав все теги через find_all() без аргументов
     # добавить в конфиг правила обработки тегов
     soup = BeautifulSoup(html, 'html.parser')
@@ -120,33 +163,30 @@ def get_converted_text(html):
         tag.name = 'span'
         tag['class'] = 'tg-spoiler'    
 
-    links = soup.find_all('a')
-    for tag in links:
-        del tag['class']
-        del tag['data-num']
-        del tag['data-thread']
-        tag['href'] = SOURCE['url']+tag['href']
+    reply_links = soup.find_all('a', attrs={'class': 'post-reply-link'})
+    for link in reply_links:
+        link.decompose()
     
     for k in REPLACEMENTS.keys():
         soup = str(soup).replace(k, REPLACEMENTS[k])
     
     soup = BeautifulSoup(soup, 'html.parser')
     
-    if len(str(soup)) > TELEGRAM['txt_limit']:
-        print(f"too long ({len(str(soup))} > {TELEGRAM['txt_limit']}) - removing tags")
+    if len(str(soup)) > len_limit:
+        print(f"too long ({len(str(soup))} > {len_limit}) - removing tags")
         all_tags = soup.find_all()
         for tag in all_tags:
             tag.extract()
 
-    if len(str(soup)) > TELEGRAM['txt_limit']:
-        print(f"still too long ({len(str(soup))} > {TELEGRAM['txt_limit']}) reducing text length")
-        soup = str(soup)[0:TELEGRAM['txt_limit']]+'[...]'
+    if len(str(soup)) > len_limit:
+        print(f"still too long ({len(str(soup))} > {len_limit}) reducing text length")
+        soup = str(soup)[0:len_limit]+'[...]'
     
     result = str(soup)
     return result
 
-def send_message(chat_id, text, parse_mode):
-    response = requests.get(f"{TELEGRAM['url']}bot{BOT['token']}/sendMessage?chat_id={chat_id}&parse_mode={parse_mode}&text={text}")
+def send_message(chat_id, text, reply_to, parse_mode):
+    response = requests.get(f"{TELEGRAM['url']}bot{BOT['token']}/sendMessage?chat_id={chat_id}&parse_mode={parse_mode}&text={text}&reply_to_message_id={reply_to}&allow_sending_without_reply=True")
     print(response.status_code)    
     if response.status_code == 200:
         message_id = response.json()['result']['message_id']
@@ -156,15 +196,43 @@ def send_message(chat_id, text, parse_mode):
     return message_id
     
 
-    #return
-    #TODO check image size before sending it to Telegram by URL - 
-    #API restrictions are <=5Mb for image and 20Mb for other files sent by URL
+def send_media_group(chat_id: int, medias: list, caption, reply_to, parse_mode):
+    
+    media_list = []
+    for media in medias:
+        media_dict = {}
+        media_dict['type'] = MEDIA['mapping'][media['type']] #как-то нечитаемо...
+        media_dict['media'] = SOURCE['url']+media['path']
+        media_list.append(media_dict)
+        del media_dict
+    media_list[0]['caption'] = caption
+    media_list[0]['parse_mode'] = parse_mode
+    
+    print('sending')
+    media_list = json.dumps(media_list)
+    print(media_list)
 
-def send_single_photo(chat_id, url):
-    response = requests.get(f"{TELEGRAM['url']}bot{BOT['token']}/sendPhoto?chat_id={chat_id}&photo={url}")
-    print(f"[{response.status_code}]: {url}")
+    response = requests.get(f"{TELEGRAM['url']}bot{BOT['token']}/sendMediaGroup?chat_id={chat_id}&media={str(media_list)}&reply_to_message_id={reply_to}&allow_sending_without_reply=True")
+    print(response.status_code)
+    if response.status_code == 200:
+        message_id = response.json()['result'][0]['message_id']
+        #                                     ^^^
+        # внимание, в структуре ответа получается так, что 
+        # при отправке mediaGroup возвращается 
+        # отдельный message_id на каждое медиа в группе
+        # поэтому для будущих регистраций соответствий 
+        # поста на 2ch и в телеге
+        # для медиагруппы будем возвращать id первого поста в ней
+    else:
+        message_id = 0
+        print('>>>>>', response.content)
+    return message_id
+    
 
-POST_TEMPLATE = "🆔{num} {anon}{emoji}\n{date}\n\n{text}"
+#POST_TEMPLATE = "🆔{num} {anon}{emoji}\n{date}\n\n{text}"
+POST_TEMPLATE = "🆔{num}\n{anon}{emoji}\n{date}\n{text}"
+
+# send_media_group(-1001779229444, FILES, 'test caption', 23757, 'HTML')
 
 while True:
     streams = get_streams()
@@ -177,45 +245,69 @@ while True:
             print(f"Getting fresh posts after  {str(stream[3])}...")
             posts = get_latest_posts(stream[1], stream[2], stream[3])
    
-        print(f"Executing task of {str(len(posts))} posts...")
+        print(f"Executing task containing [{str(len(posts))}] posts...")
         if posts == []:
             print(f'No new posts for Stream #{stream[0]}')
             break 
         for post in posts:
-            print(f"Sending [{posts.index(post)+1}/{len(posts)}]")
-            try:    
-                msg_id = send_message(
-                    stream[4], 
-                        POST_TEMPLATE.format(
-                        num = str(post['num']), 
-                        anon = get_anon_id(post['name']) if 'name' in post.keys() else '<i>Аноним</i>', 
-                        emoji = get_flag_emoji(post['icon']) if 'icon' in post.keys() else '🐽',
-                        date = get_date_from_ts(post['timestamp']),
-                        text = get_converted_text(post['comment'])
-                        ),
-                        'HTML'
-                    )
-                print(f"Post {str(post['num'])} sent. Telegram ID: {msg_id}")    
-                cur.execute(f"update streams set src_last_post_id = {post['num']} where id = {stream[0]}")
-                cur.execute("insert into mappings values (?,?,?)", (stream[0], post['num'], msg_id))
-                conn.commit()
-                print(f"Post {str(post['num'])} registered.")
-            except Exception as e:
-                print(f"Failed to send post {str(post['num'])}!", str(e))
-            time.sleep(TELEGRAM['posting_delay'])
+            print(f"Sending post [{post['num']}] [{posts.index(post)+1}/{len(posts)}]")
+            post = add_replies(post, 'comment')
+            print(f"Checking if post is a reply to: {'>'+str(post['replies'][-1]) if post['replies'] != [] else str('')}")
+                        
+            post = remove_unsupported_media(post)
+
+            if post['files'] is not None:
+                try:    #блок кода для текстового поста
+                    print('Sending media post...')
+                    msg_id = send_media_group(
+                        stream[4], 
+                            post['files'],
+                            POST_TEMPLATE.format(
+                            num = str(post['num']), 
+                            anon = get_anon_id(post['name']) if 'name' in post.keys() else '<i>Аноним</i>', 
+                            emoji = get_flag_emoji(post['icon']) if 'icon' in post.keys() else '🐽',
+                            date = get_date_from_ts(post['timestamp']),
+                            text = get_converted_text(post['comment'], TELEGRAM['cap_limit'])
+                            ),
+                            get_mapped_value(stream[0], post['replies'][-1]) if post['replies'] != [] else 0,
+                            'HTML'
+                        )
+                    print(f"Post {str(post['num'])} sent. Telegram ID: {msg_id}")    
+                    cur.execute(f"update streams set src_last_post_id = {post['num']} where id = {stream[0]}")
+                    cur.execute("insert into mappings values (?,?,?)", (stream[0], post['num'], msg_id))
+                    conn.commit()
+                    print(f"Post {str(post['num'])} registered.")
+                except Exception as e:
+                    print(f"Failed to send media post {str(post['num'])}!", str(e))
+                time.sleep(TELEGRAM['posting_delay']*len(post['files'])) 
+                # поскольку каждое медиа в группе считается отдельным сообщением
+                # на эти сообщения распространяются лимиты на сранье
+                # поэтому, отправив три картинки, мы ждем минимум 9 секунд!
+
+            else:
+                try:    #блок кода для текстового поста
+                    print('Sending text post...')
+                    msg_id = send_message(
+                        stream[4], 
+                            POST_TEMPLATE.format(
+                            num = str(post['num']), 
+                            anon = get_anon_id(post['name']) if 'name' in post.keys() else '<i>Аноним</i>', 
+                            emoji = get_flag_emoji(post['icon']) if 'icon' in post.keys() else '🐽',
+                            date = get_date_from_ts(post['timestamp']),
+                            text = get_converted_text(post['comment'], TELEGRAM['txt_limit'])
+                            ),
+                            get_mapped_value(stream[0], post['replies'][-1]) if post['replies'] != [] else 0,
+                            'HTML'
+                        )
+                    print(f"Post {str(post['num'])} sent. Telegram ID: {msg_id}")    
+                    cur.execute(f"update streams set src_last_post_id = {post['num']} where id = {stream[0]}")
+                    cur.execute("insert into mappings values (?,?,?)", (stream[0], post['num'], msg_id))
+                    conn.commit()
+                    print(f"Post {str(post['num'])} registered.")
+                except Exception as e:
+                    print(f"Failed to send text post {str(post['num'])}!", str(e))
+                time.sleep(TELEGRAM['posting_delay'])
         print(f"Task {stream[0]} complete.")
     print('All tasks complete, restarting...')
     time.sleep(1)
 
-    # только текст - send_message (chat_id, text)
-    # только картинка - http_url (5Mb photo, 20Mb other) https://2ch.hk/po/src/46440864/16522706230210.jpg
-    # только несколько картинок, но не более 10
-    # только несколько картинок и видео, но не более 10
-    # текст + 1 картинка
-    # текст и несколько картинок/видео
-
-# Post 48898973 sent. Telegram ID: 15067
-
-# You can send 1 message per second to individual chats
-# You can send 20 messages per minute to groups/channels
-# But at that moment you cannot send more than 30 messages per second overall.
